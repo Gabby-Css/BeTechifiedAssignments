@@ -1,0 +1,7 @@
+# intermediates - regenerate with make_video.py
+out/preview/
+out/score.wav
+out/render.log
+out/render.time
+__pycache__/
+media/

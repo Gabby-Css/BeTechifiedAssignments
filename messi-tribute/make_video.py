@@ -31,7 +31,7 @@ from collections import namedtuple
 from functools import lru_cache
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 # --------------------------------------------------------------------------- timing
 W, H, FPS = 1080, 1920, 30
@@ -147,7 +147,7 @@ def fit_size(text, kind, size, max_w, tracking):
 
 
 @lru_cache(maxsize=1024)
-def text_sprite(text, kind, size, color, tracking_em, glow, glow_color):
+def text_sprite(text, kind, size, color, tracking_em, glow, glow_color, shadow=False):
     f = font(kind, size)
     cap_h = -f.getbbox("H", anchor="ls")[1]
     desc = int(size * 0.28)
@@ -178,6 +178,12 @@ def text_sprite(text, kind, size, color, tracking_em, glow, glow_color):
     main = paint(color)
     if glow:
         main = with_glow(main, paint(glow_color or color).getchannel("A"), glow_color or color, glow)
+    if shadow:   # soft dark halo so text stays readable on top of photos
+        a = paint((0, 0, 0)).getchannel("A").filter(ImageFilter.GaussianBlur(max(8, size * 0.06)))
+        sh = Image.new("RGBA", main.size, (0, 0, 0, 0))
+        sh.putalpha(a.point(lambda v: min(255, int(v * 1.6))))
+        sh.alpha_composite(main)
+        main = sh
     return Sprite(main, wl / 2, base_y - cap_h / 2)
 
 
@@ -210,8 +216,14 @@ def dot_sprite(size, color, alpha_q):
 
 # --------------------------------------------------------------------------- scene helper
 def hit_state(t):
-    """(flash, shake_x, shake_y) from the most recent hit."""
+    """(flash, shake_x, shake_y) from the most recent hit (and, with photos, the hook's picture cuts)."""
     flash = sx = sy = 0.0
+    if PHOTOS:
+        for ct in HOOK_CUT_TIMES:
+            dt = t - ct
+            if 0 <= dt < 0.2:
+                flash = max(flash, 0.26 * math.exp(-dt * 24))
+                sx += 7 * math.sin(dt * 120)
     for ht, s in HIT_TIMES:
         dt = t - ht
         if 0 <= dt < 0.5:
@@ -259,7 +271,7 @@ class Ctx:
         if dt < 0 or (t1 is not None and self.t >= t1):
             return
         size = fit_size(text, kind, size, max_w, tracking)
-        sp = text_sprite(text, kind, size, color, tracking, glow, glow_color)
+        sp = text_sprite(text, kind, size, color, tracking, glow, glow_color, bool(PHOTOS))
         a, sc, oy = alpha, 1.0, 0.0
         if anim == "slam":
             sc = 1 + 1.1 * (1 - ease_out_expo(clamp(dt / 0.20)))
@@ -309,7 +321,7 @@ class Ctx:
         for j, ch in enumerate(s):
             if ch == " ":
                 continue
-            sp = text_sprite(ch, "black", size, color, 0.0, glow, glow_color)
+            sp = text_sprite(ch, "black", size, color, 0.0, glow, glow_color, bool(PHOTOS))
             x = cx + (-total / 2 + (j + 0.5) * cell) * sc
             if dt > dur and dt - dur < 0.28:
                 k = (1 - (dt - dur) / 0.28) ** 2
@@ -342,13 +354,15 @@ class Ctx:
 
 # --------------------------------------------------------------------------- the story
 def scenes(c: Ctx):
-    # ---------- S1  hook (beats 0-8)
+    # ---------- S1  hook (beats 0-8).  With photos the text sits lower so it doesn't cover the face.
     ex = b(7.4)
-    c.el("LIONEL MESSI", 540, 610, 46, b(1), ex, color=SKY, kind="bold", anim="rise", tracking=0.35)
-    c.el("HE SAID", 540, 850, 205, b(2), ex, glow=26, glow_color=SKY)
-    c.el("GOODBYE", 540, 1060, 205, b(3), ex, color=SKY, glow=26)
-    c.el("TO ARGENTINA", 540, 1235, 118, b(4), ex, glow=14, glow_color=SKY)
-    c.line(540, 1325, 640, b(4.5), ex)
+    d = 140 if PHOTOS else 0
+    c.el("LIONEL MESSI", 540, 610 + d, 46, b(0.5 if PHOTOS else 1), ex, color=SKY, kind="bold",
+         anim="rise", tracking=0.35)
+    c.el("HE SAID", 540, 850 + d, 205, b(2), ex, glow=26, glow_color=SKY)
+    c.el("GOODBYE", 540, 1060 + d, 205, b(3), ex, color=GOLD if PHOTOS else SKY, glow=26)
+    c.el("TO ARGENTINA", 540, 1235 + d, 118, b(4), ex, glow=14, glow_color=SKY)
+    c.line(540, 1325 + d, 640, b(4.5), ex)
 
     # ---------- S2  21 years (beats 8-12)
     ex = b(11.7)
@@ -502,10 +516,137 @@ GRAIN = [np.repeat(np.repeat(np.random.default_rng(100 + k).integers(-3, 4, (H /
 BG_DIR = None
 
 
+# --------------------------------------------------------------------------- photo layer (freely licensed / your own photos)
+PHOTOS: list = []            # sorted image paths, filled by main() from --photos
+PHOTO_EXT = {".jpg", ".jpeg", ".png", ".webp"}
+BW, BH = 1296, 2304          # working size of a prepared photo (1.2x the output, headroom for Ken Burns)
+HOOK_CUT_TIMES = [b(0.5 * k) for k in range(8)]
+
+# (start_beat, end_beat, strength, grade, focus_y, zoom_end)
+#   strength = how much photo vs. the navy background;  focus_y = where the face sits in the frame (0 top .. 1 bottom)
+MEDIA_SEGS = (
+    [(0.5 * k, 0.5 * k + 0.5, 0.84, "cool", 0.27, 1.07) for k in range(8)]      # hook: 8 rapid cuts, 1 per half-beat
+    + [(4, 8, 0.80, "cool", 0.27, 1.17)]                                        # hook: settle on the hero shot
+    + [(8, 12, 0.42, "cool", 0.40, 1.10)]                                       # 2005 -> 2026
+    + [(12 + 4 * k, 16 + 4 * k, 0.38, "cool", 0.40, 1.10) for k in range(4)]    # stat counters
+    + [(28, 34, 0.42, "gold", 0.40, 1.10), (34, 36, 0.60, "gold", 0.40, 1.12)]  # trophies, 2022
+    + [(36, 40, 0.40, "mono", 0.40, 1.08), (40, 44, 0.30, "mono", 0.40, 1.06),
+       (44, 48, 0.40, "mono", 0.40, 1.08)]                                      # the farewell
+    + [(48, 52, 0.40, "cool", 0.40, 1.10), (52, 56, 0.45, "gold", 0.40, 1.10)]  # not football, not yet
+    + [(56, 64, 0.60, "gold", 0.30, 1.12)]                                      # gracias, leo
+)
+# if footage clips are supplied too, photos only take these beat ranges and clips fill the rest
+PHOTO_ONLY_RANGES = [(0, 8), (34, 36), (56, 64)]
+
+
+def assign_photos(paths):
+    """Segment i gets a photo.  Files named hook_* are reserved for the first 9 (hook) segments."""
+    hook = [p for p in paths if os.path.basename(p).lower().startswith("hook")]
+    rest = [p for p in paths if p not in hook] or paths
+    hook = hook or paths
+    out, hi, ri = [], 0, 0
+    for k, seg in enumerate(MEDIA_SEGS):
+        if k < 9:
+            out.append(hook[hi % len(hook)]); hi += 1
+        else:
+            out.append(rest[ri % len(rest)]); ri += 1
+    return out
+
+
+@lru_cache(maxsize=64)
+def face_center(path):
+    """Largest frontal face centre (x, y) in source pixels, or None. Needs opencv-python-headless<5 (optional)."""
+    try:
+        import cv2
+        cas = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+        if not os.path.exists(cas):
+            return None
+        im = ImageOps.exif_transpose(Image.open(path)).convert("L")
+        scale = 1000 / max(im.size) if max(im.size) > 1000 else 1.0
+        small = im.resize((int(im.width * scale), int(im.height * scale)))
+        faces = cv2.CascadeClassifier(cas).detectMultiScale(np.asarray(small), 1.1, 5,
+                                                              minSize=(int(40 * scale + 20),) * 2)
+        if len(faces) == 0:
+            return None
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        return (x + w / 2) / scale, (y + h / 2) / scale
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=24)
+def prep_photo(path, focus_y):
+    """Cut the biggest 9:16 window that keeps the face (or the upper-middle if none) at focus_y, resized to BWxBH."""
+    im = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+    iw, ih = im.size
+    fx, fy = face_center(path) or (iw * 0.5, ih * 0.40)
+    cw = min(iw, ih * 9 / 16)
+    ch = cw * 16 / 9
+    left = min(max(fx - cw / 2, 0), iw - cw)
+    top = min(max(fy - focus_y * ch, 0), ih - ch)
+    return im.crop((int(left), int(top), int(left + cw), int(top + ch))).resize((BW, BH), Image.Resampling.LANCZOS)
+
+
+def _shade(top_a, bot_start, bot_a, floor=0.0):
+    """Dark navy veil: heavier at the top and bottom, plus an even 'floor' so bright photos can't wash out the text."""
+    y = np.linspace(0, 1, H, dtype=np.float32)[:, None]
+    a = np.clip(1 - y / 0.22, 0, 1) * top_a + np.clip((y - bot_start) / (1 - bot_start), 0, 1) ** 1.3 * bot_a
+    a = 1 - (1 - np.clip(a, 0, 1)) * (1 - floor)
+    return Image.fromarray((np.repeat(a, W, 1) * 255).astype(np.uint8), "L")
+
+
+SHADE_HOOK, SHADE_BODY = _shade(0.45, 0.42, 0.85, 0.08), _shade(0.30, 0.60, 0.50, 0.34)
+_TONES = {"cool": ((210, 232, 255), SKY), "gold": ((255, 230, 160), (150, 95, 10)), "mono": ((205, 220, 238), (55, 75, 105))}
+
+
+def grade(im, kind):
+    """Contrast + brand-colour tritone mixed back in, so photos from different sources look like one set."""
+    im = ImageEnhance.Contrast(im).enhance(1.15)
+    im = ImageEnhance.Color(im).enhance(0.18 if kind == "mono" else 0.85)
+    hi, mid = _TONES[kind]
+    tint = ImageOps.colorize(ImageOps.grayscale(im), black=NAVY0, white=hi, mid=mid)
+    return Image.blend(im, tint, 0.70 if kind == "mono" else 0.38)
+
+
+def photo_state(t, photo_only=False):
+    """(segment index, local progress) of the photo segment at time t, or None."""
+    beat = t / BEAT
+    for k, (s0, s1, *_rest) in enumerate(MEDIA_SEGS):
+        if s0 <= beat < s1:
+            if photo_only and not any(a <= s0 < z for a, z in PHOTO_ONLY_RANGES):
+                return None
+            return k, (beat - s0) / (s1 - s0)
+    return None
+
+
+def photo_layer(t, photo_only=False):
+    st = photo_state(t, photo_only)
+    if st is None:
+        return None
+    k, p = st
+    s0, s1, strength, kind, fy_, zend = MEDIA_SEGS[k]
+    base = prep_photo(PHOTO_ASSIGN[k], fy_)
+    dt = t - b(s0)
+    z = 1 + (zend - 1) * p + (0.10 * math.exp(-dt * 14) if k < 8 else 0.0)   # slow push-in + a punch on every hook cut
+    cw, ch = BW / z, BH / z
+    cx = min(max(BW / 2 + (p - 0.5) * 36 * (1 if k % 2 else -1), cw / 2), BW - cw / 2)
+    cy = min(max(BH / 2, ch / 2), BH - ch / 2)
+    im = base.resize((W, H), Image.Resampling.BICUBIC, box=(cx - cw / 2, cy - ch / 2, cx + cw / 2, cy + ch / 2))
+    return grade(im, kind), strength, (SHADE_HOOK if k < 9 else SHADE_BODY)
+
+
+PHOTO_ASSIGN: list = []
+
+
 def render_frame(i: int) -> bytes:
     t = i / FPS
     canvas = make_background(t)
-    if BG_DIR:
+    layer = photo_layer(t, photo_only=bool(BG_DIR)) if PHOTOS else None
+    if layer is not None:
+        im, strength, shade = layer
+        canvas = Image.blend(canvas, im.convert("RGBA"), strength)
+        canvas.paste(NAVY0 + (255,), mask=shade)
+    elif BG_DIR:
         clip = Image.open(os.path.join(BG_DIR, f"bg_{i + 1:05d}.jpg")).convert("RGBA")
         canvas = Image.blend(canvas, clip, 0.60)
         veil = Image.new("RGBA", (W, H), NAVY0 + (125,))
@@ -516,7 +657,7 @@ def render_frame(i: int) -> bytes:
     if flash > 0.01:
         canvas.alpha_composite(Image.new("RGBA", (W, H), (255, 255, 255, int(255 * flash))))
     arr = np.asarray(canvas.convert("RGB"), dtype=np.int16) + GRAIN[i % 6]
-    k = min(clamp(t / 0.3), clamp((DUR - t) / 0.9))
+    k = min(1.0 if PHOTOS else clamp(t / 0.3), clamp((DUR - t) / 0.9))   # with photos, frame 0 is already the hook
     if k < 1:
         arr = arr * k
     return np.clip(arr, 0, 255).astype(np.uint8).tobytes()
@@ -805,6 +946,14 @@ def synth_score(path: str):
 
 
 # --------------------------------------------------------------------------- main
+def _cv2_ok():
+    try:
+        import cv2
+        return os.path.exists(os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
+    except Exception:
+        return False
+
+
 def mux_command(wav, out):
     return ["ffmpeg", "-y", "-loglevel", "error", "-stats",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
@@ -818,10 +967,15 @@ def mux_command(wav, out):
 
 
 def main():
-    global BG_DIR
+    global BG_DIR, PHOTOS, PHOTO_ASSIGN
+    here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "out", "messi_tribute.mp4"))
-    ap.add_argument("--clips", help="folder of YOUR OWN / licensed videos+images to put under the graphics")
+    ap.add_argument("--out", default=os.path.join(here, "out", "messi_tribute.mp4"))
+    ap.add_argument("--photos", default=None,
+                    help="folder of photos you may use (default: media/photos next to this script, if it exists)")
+    ap.add_argument("--no-photos", action="store_true", help="ignore media/photos and render the typography-only version")
+    ap.add_argument("--clips", help="folder of YOUR OWN / licensed videos to put under the graphics "
+                                    "(default: media/clips next to this script, if it exists)")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2)))
     ap.add_argument("--still", nargs=2, metavar=("SECONDS", "PNG"), help="render one frame and exit")
     ap.add_argument("--audio-only", action="store_true")
@@ -832,10 +986,35 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     wav = os.path.join(out_dir, "score.wav")
 
+    def _files(folder, exts):
+        if not folder or not os.path.isdir(folder):
+            return []
+        return sorted(os.path.join(folder, f) for f in os.listdir(folder)
+                      if os.path.splitext(f)[1].lower() in exts and not f.startswith(("_", ".")))
+
+    photo_dir = args.photos or os.path.join(here, "media", "photos")
+    if not args.no_photos:
+        PHOTOS = _files(photo_dir, PHOTO_EXT)
+    if args.photos and not PHOTOS and not args.no_photos:
+        raise SystemExit(f"--photos: no images found in {photo_dir}")
+    if PHOTOS:
+        PHOTO_ASSIGN = assign_photos(PHOTOS)
+        print(f"[photos] {len(PHOTOS)} photo(s) from {photo_dir}  (face-aware 9:16 crops: "
+              f"{'on' if face_center(PHOTOS[0]) is not None or _cv2_ok() else 'off - pip install \"opencv-python-headless<5\"'})")
+        if len(PHOTOS) < 10:
+            print(f"[photos] note: {len(PHOTOS)} < 10 photos, some will repeat in the hook montage")
+        credits = os.path.join(photo_dir, "credits.txt")
+        if os.path.exists(credits):
+            shutil.copy(credits, os.path.join(out_dir, "credits.txt"))
+            print(f"[photos] credits copied to {os.path.join(out_dir, 'credits.txt')} - paste them in your caption/description")
+        else:
+            print("[photos] no credits.txt next to the photos - make sure you have the right to use each one and credit it")
+
     work = None
-    if args.clips:
+    clips_dir = args.clips or os.path.join(here, "media", "clips")
+    if (args.clips or _files(clips_dir, VIDEO_EXT)) and os.path.isdir(clips_dir):
         work = tempfile.mkdtemp(prefix="messi_footage_")
-        BG_DIR = prepare_footage(args.clips, work)
+        BG_DIR = prepare_footage(clips_dir, work)
 
     if args.still:
         sec, png = float(args.still[0]), args.still[1]

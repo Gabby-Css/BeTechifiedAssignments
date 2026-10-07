@@ -7,6 +7,7 @@ so there is no third-party footage or music that can be muted, blocked or struck
 `out/messi_tribute.mp4` – the finished video (1080×1920, 30 fps, H.264 + AAC, ≈ -14 LUFS)
 `out/cover.png` – a cover frame for the thumbnail
 `make_video.py` – the whole pipeline in one file
+`fetch_photos.py` – downloads freely licensed Messi photos (+ credits) from Wikimedia Commons
 
 ## What the video says (and where each fact comes from)
 
@@ -42,25 +43,49 @@ Arial Black / DejaVu Bold. Edit the text in `scenes()`; edit timing with the bea
 (90 BPM, 16 bars = 42.67 s). Hit times live in `HITS` and drive **both** the screen flashes/shakes and the
 audio impacts, so picture and sound stay in sync when you move things.
 
-### Putting real footage underneath (only footage you're allowed to use)
+## Real Messi photos and clips (the legitimate way)
+
+The video you get out of the box is typography-only. To make the hook much stronger with **real photos of Messi**:
 
 ```bash
-python3 make_video.py --clips ./my_clips      # .mp4/.mov/.webm videos and .jpg/.png photos
+pip install pillow numpy "opencv-python-headless<5"     # opencv = face-aware 9:16 cropping (optional but recommended)
+python3 fetch_photos.py                                  # -> media/photos/  (+ credits.txt, _contact.jpg)
+python3 make_video.py                                    # picks media/photos and media/clips up automatically
 ```
 
-One clip per bar (2.67 s) is cut under the graphics, darkened so the text stays readable. Photos get a slow
-Ken-Burns zoom. **Only use media you own, have a licence for, or have written permission to use.**
-Good, legitimate sources:
+`fetch_photos.py` uses Wikimedia Commons' official API and keeps **only freely licensed files (CC0, public domain, CC BY,
+CC BY-SA)** - never NC/ND/fair-use. It writes `media/photos/credits.txt` (paste the "Short version" line in your caption -
+CC BY / CC BY-SA *require* credit). It needs internet access to `commons.wikimedia.org` and `upload.wikimedia.org`, so run it on
+your own computer, or allow those two hosts in the sandbox's network settings.
+**Open `media/photos/_contact.jpg` and delete anything that isn't Messi** - search results can include other people.
+
+What the photos do in the video:
+
+* **Hook (0-5.3 s):** 8 photo cuts, one every half-beat (flash + punch-zoom + shake on each), then a slow push-in on your hero shot, with
+  "HE SAID GOODBYE TO ARGENTINA" slamming in over it. Frame 0 is already a photo, so the cover/thumbnail is strong.
+* **Body:** one photo per section behind the numbers / trophies / farewell (graded to the sky-blue + gold palette, desaturated for the
+  farewell) so photos from different sources look like one set.
+* Photos named `hook_*` are used for the hook (the first 9 slots) - **rename your best 1-3 shots `hook_01_...`**. Faces are
+  centred in the upper third automatically; with no face found it crops upper-middle.
+* 10+ photos recommended; with fewer, some repeat. `--no-photos` renders the typography-only version.
+
+### Your own footage / clips
+
+Drop **videos you have the right to use** in `media/clips/` (or `--clips DIR`). They are cut one per bar under the graphics; photos
+keep the hook, the 2022 beat and the final "Gracias, Leo" bars. Photos can also go in `media/photos/` by hand (jpg/png/webp).
+
+**Only use media you own, have a licence for, or have written permission to use.** Good, legitimate sources:
 
 * your own phone footage from a watch party / stadium;
-* official press kits and channels that explicitly allow reuse (check each one's terms);
-* creators who say yes when you message them (get it in writing and credit them in the caption);
-* TikTok's own **Stitch / Duet** buttons – they keep the original creator credited and are the
-  platform-approved way to react to somebody else's clip;
-* CC-licensed photos on Wikimedia Commons (follow the attribution rules in each licence).
+* Wikimedia Commons photos/videos with a free licence (`fetch_photos.py`; credit the author);
+* official press kits and channels that explicitly allow reuse (read each one's terms);
+* creators who say yes when you message them (get it in writing and credit them);
+* TikTok's own **Stitch / Duet** buttons - they keep the original creator credited and are the platform-approved way to react to
+  somebody else's clip.
 
-Downloading other people's clips from TikTok/YouTube and re-uploading them is the fastest way to get a video muted,
-demonetised or your account struck – so the script doesn't do that.
+Scraping photos and clips from TikTok / Instagram / X / YouTube and re-uploading them is the fastest way to get a video muted,
+demonetised or your account struck, and it ignores the photographers' and creators' rights - so this project does not do that.
+(A free *copyright* licence also doesn't mean Messi endorses your video; keep it editorial and credited.)
 
 ## Free / open-source tools worth knowing (found via web search)
 
